@@ -1,5 +1,6 @@
 import numpy as np
 from typing import Tuple, Optional, Union, Literal
+from numpy.lib.stride_tricks import as_strided
 
 
 # TODO: Use loops first, then use vectorization. [Fucking loop is slow as fuck.]
@@ -33,37 +34,6 @@ class Conv2D:
         self.bias = bias
         self.padding_mode = padding_mode
 
-    def apply_conv2d(self, input_matrix: np.ndarray):
-        """Applies a conv2D operation on top of an input image."""
-        input_matrix = input_matrix.copy()
-
-        if any(self.padding):
-            if self.input_channel < 3:
-                pad_width = ((self.padding[0], self.padding[0]), (self.padding[1], self.padding[1]))
-            else:
-                pad_width = ((0, 0), (self.padding[0], self.padding[0]), (self.padding[1], self.padding[1]))
-            input_matrix = np.pad(input_matrix, pad_width=pad_width, mode=self.padding_mode)
-
-        _, in_H, in_W = input_matrix.shape
-        output_matrix, out_H, out_W = self.calculate_output_shape(in_H, in_W)
-        kernels, biases = self.initialize_kernels_and_bias()
-        for c in range(self.output_channels):
-            current_kernel = kernels[c]
-            for h in range(out_H):
-                for w in range(out_W):
-                    h_start, w_start = h * self.stride[0], w * self.stride[1]
-                    if input_matrix.ndim == 2:
-                        receptive_field = input_matrix[
-                                          h_start: (h_start + self.kernel_size[0]) * self.dilation[0]: self.dilation[0],
-                                          w_start: (w_start + self.kernel_size[1]) * self.dilation[1]: self.dilation[1]]
-                    else:
-                        receptive_field = input_matrix[:,
-                                          h_start: (h_start + self.kernel_size[0]) * self.dilation[0]: self.dilation[0],
-                                          w_start: (w_start + self.kernel_size[1]) * self.dilation[1]: self.dilation[1]]
-                    output_matrix[c, h, w] = np.sum(receptive_field * current_kernel)
-            output_matrix[c, :, :] += biases[c]
-
-        return output_matrix
 
     def calculate_output_shape(self, matrix_height: int, matrix_width: int):
         """Returns the skeletons of the output matrix."""
@@ -73,9 +43,11 @@ class Conv2D:
                  1) // self.stride[1] + 1
         return np.zeros((self.output_channels, out_H, out_W), np.float32), out_H, out_W
 
+
     def weight_initialization(self):
         """weight initialization technique."""
         ...
+
 
     def initialize_kernels_and_bias(self):
         """Initializes the kernels and biases ♋ """
@@ -87,3 +59,66 @@ class Conv2D:
                                           self.kernel_size[0], self.kernel_size[1]))
         bias = np.random.uniform(-np.sqrt(1 / k), np.sqrt(1 / k), size=(self.output_channels,))
         return kernels, bias
+
+
+    def apply_conv2d(self, matrices: np.ndarray):
+        """Applies a conv2D operation on top of an input image or batch (fully vectorized and optimized)."""
+
+        # Handle different input dimensions
+        original_ndim = matrices.ndim
+
+        if original_ndim == 2:
+            # Single channel, single image: (H, W) -> (1, 1, H, W)
+            matrices = matrices[np.newaxis, np.newaxis, :, :]
+        elif original_ndim == 3:
+            # Single image with channels: (C, H, W) -> (1, C, H, W)
+            matrices = matrices[np.newaxis, :, :, :]
+        # else: already batched (N, C, H, W)
+
+        N, in_C, in_H, in_W = matrices.shape
+
+        # Apply padding if needed
+        if any(self.padding):
+            pad_width = (
+                (0, 0),  # no padding on batch dimension
+                (0, 0),  # no padding on channel dimension
+                (self.padding[0], self.padding[0]),  # height padding
+                (self.padding[1], self.padding[1])  # width padding
+            )
+            matrices = np.pad(matrices, pad_width=pad_width, mode=self.padding_mode)
+            _, _, in_H, in_W = matrices.shape
+
+        # Calculate output shape
+        output_matrix, out_H, out_W = self.calculate_output_shape(in_H, in_W)
+        kernels, biases = self.initialize_kernels_and_bias()
+
+        # Pre-flatten kernels: (out_C, in_C, kH, kW) -> (out_C, in_C*kH*kW)
+        kernels_flat = kernels.reshape(self.output_channels, -1)
+
+        # Create sliding windows view with as_strided
+        # Output shape: (N, in_C, out_H, out_W, kH, kW)
+        shape = (N, in_C, out_H, out_W, self.kernel_size[0], self.kernel_size[1])
+        strides = (
+            matrices.strides[0],  # batch stride
+            matrices.strides[1],  # channel stride
+            matrices.strides[2] * self.stride[0],  # output height stride
+            matrices.strides[3] * self.stride[1],  # output width stride
+            matrices.strides[2] * self.dilation[0],  # kernel height stride
+            matrices.strides[3] * self.dilation[1]  # kernel width stride
+        )
+        receptive_fields = as_strided(matrices, shape=shape, strides=strides)
+        # Reshape for efficient matrix multiplication
+        # From: (N, in_C, out_H, out_W, kH, kW)
+        # To:   (N*out_H*out_W, in_C*kH*kW)
+        receptive_fields = receptive_fields.transpose(0, 2, 3, 1, 4, 5).reshape(N * out_H * out_W, -1)
+
+        # Perform convolution via GEMM
+        # (N*out_H*out_W, in_C*kH*kW) @ (in_C*kH*kW, out_C) -> (N*out_H*out_W, out_C)
+        output_flat = receptive_fields @ kernels_flat.T
+
+        # Reshape to final output shape
+        # From: (N*out_H*out_W, out_C) 
+        # To:   (N, out_C, out_H, out_W)
+        output_matrix = output_flat.reshape(N, out_H, out_W, self.output_channels).transpose(0, 3, 1, 2)
+        output_matrix += biases.reshape(1, -1, 1, 1)    # Add biases
+        return output_matrix
