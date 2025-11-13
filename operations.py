@@ -21,14 +21,22 @@ class Conv2D:
 
         if not isinstance(kernel_size, Tuple):
             self.kernel_size = (kernel_size, kernel_size)
+        else:
+            self.kernel_size = kernel_size
         if not isinstance(stride, Tuple):
             self.stride = (stride, stride)
+        else:
+            self.stride = stride
         if not isinstance(padding, Tuple):
             self.padding = (padding, padding)
+        else:
+            self.padding = padding
         if not isinstance(dilation, Tuple):
             self.dilation = (dilation, dilation)
+        else:
+            self.dilation = dilation
 
-        self.bias = bias
+        self.use_bias = bias
         self.padding_mode = padding_mode
 
         k = self.input_channel * self.kernel_size[0] * self.kernel_size[1]
@@ -37,12 +45,12 @@ class Conv2D:
                                                               self.input_channel,
                                                               self.kernel_size[0],
                                                               self.kernel_size[1]))
-        if bias:
+        if self.use_bias:
             self.bias = np.random.uniform(-limit, limit, size=(output_channels,))
 
 
-    def forward(self, x: np.ndarray):
-        x = x.copy()
+    def forward(self, data: np.ndarray):
+        x = data.copy()
         x_dim = x.ndim
         if x_dim == 2:
             x = x[np.newaxis, np.newaxis, :, :]
@@ -61,10 +69,10 @@ class Conv2D:
         else:
             N, in_C, in_H, in_W = x.shape
 
-        out_H = (in_H + 2 * self.padding[0] - self.dilation[0] * (self.kernel_size[0] - 1) -
+        out_H = (in_H - self.dilation[0] * (self.kernel_size[0] - 1) -
                  1) // self.stride[0] + 1
-        out_W = (in_W + 2 * self.padding[0] - self.dilation[0] * (self.kernel_size[0] - 1) -
-                 1) // self.stride[0] + 1
+        out_W = (in_W - self.dilation[1] * (self.kernel_size[1] - 1) -
+                 1) // self.stride[1] + 1
 
         # flatteing_kernels: [out_C, in_C, kH, kW] -> [out_C, in_C * kH * kW]
         kernels_flat = self.weights.reshape(self.output_channels, -1)
@@ -91,8 +99,63 @@ class Conv2D:
 
 
 
+class MaxPool2D:
+    def __init__(self,
+                 kernel_size: Union[int, Tuple],
+                 stride: Optional[Union[int, Tuple[int, int]]] = 1,
+                 padding: Optional[Union[int, Tuple[int, int]]] = 0,
+                 dilation: Optional[Union[int, Tuple[int, int]]] = 1):
+        
+        if not isinstance(kernel_size, Tuple):
+            self.kernel_size = (kernel_size, kernel_size)
+        else:
+            self.kernel_size = kernel_size
+        if not isinstance(stride, Tuple):
+            self.stride = (stride, stride)
+        else:
+            self.stride = stride
+        if not isinstance(padding, Tuple):
+            self.padding = (padding, padding)
+        else:
+            self.padding = padding
+        if not isinstance(dilation, Tuple):
+            self.dilation = (dilation, dilation)
+        else:
+            self.dilation = dilation
 
 
+    def forward(self, data: np.ndarray):
+        x = data.copy()
+        x_dim = x.ndim
+        if x_dim == 2:
+            x = x[np.newaxis, np.newaxis, :, :]
+        elif x_dim == 3:
+            x = x[np.newaxis, :, :, :]
 
+        if any(self.padding):
+            pad_width = (
+                (0, 0),  # no padding on batch dimension
+                (0, 0),  # no padding on channel dimension
+                (self.padding[0], self.padding[0]),  # height padding
+                (self.padding[1], self.padding[1])  # width padding
+            )
+            x = np.pad(x, pad_width=pad_width, mode="constant", constant_values=-np.inf)
+            N, in_C, in_H, in_W = x.shape
+        else:
+            N, in_C, in_H, in_W = x.shape
 
+        out_H = (in_H - self.dilation[0] * (self.kernel_size[0] - 1) -1) // self.stride[0] + 1
+        out_W = (in_W - self.dilation[1] * (self.kernel_size[1] - 1) -1) // self.stride[1] + 1
+        
+        shape = (N, in_C, out_H, out_W, self.kernel_size[0], self.kernel_size[1])
+        strides = (
+            x.strides[0],                      # batch stride
+            x.strides[1],                      # channel stride
+            x.strides[2] * self.stride[0],     # output height stride
+            x.strides[3] * self.stride[1],     # output width stride
+            x.strides[2] * self.dilation[0],   # kernel height stride
+            x.strides[3] * self.dilation[1]    # kernel width stride
+        )
 
+        patches = as_strided(x, shape=shape, strides=strides)
+        return np.max(patches, axis=(4, 5))
